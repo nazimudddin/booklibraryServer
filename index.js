@@ -12,15 +12,38 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 const PORT = 5000;
 
-const client = new MongoClient(process.env.MONGODB_URI);
+const mongoUri = process.env.MONGODB_URI?.trim();
+
+if (!mongoUri) {
+  throw new Error("MONGODB_URI is required before starting the backend.");
+}
+
+if (!/^mongodb(?:\+srv)?:\/\//i.test(mongoUri)) {
+  throw new Error("MONGODB_URI must use the mongodb:// or mongodb+srv:// scheme.");
+}
+
+const client = new MongoClient(mongoUri, {
+  // Fail startup promptly when Atlas cannot be reached instead of allowing a
+  // later collection access to crash the process with an undefined client.
+  connectTimeoutMS: 10_000,
+  serverSelectionTimeoutMS: 10_000,
+});
 
 export async function connectToMongoDB() {
   try {
     await client.connect();
+    await client.db("booklibrary").command({ ping: 1 });
     console.log("You successfully connected to MongoDB!");
     return client;
-  } catch (err) {
-    console.dir(err);
+  } catch (error) {
+    await client.close().catch(() => undefined);
+    console.error(
+      "MongoDB connection failed. Check the Atlas Network Access allow list and outbound TCP access to port 27017.",
+      error?.name,
+      "-",
+      error?.message
+    );
+    throw error;
   }
 }
 const mongoClient = await connectToMongoDB();
@@ -181,10 +204,35 @@ app.post("/add-books", async (req, res) => {
   });
   res.send(result);
 });
-app.get("/all-books",async(req,res)=>{
-  const result = await booksCollection.find({}).sort({ createdAt: -1 }).toArray();
-  res.send(result.map(toPublicBook));
-})
+app.get("/all-books", async (req, res) => {
+  try {
+    const result = await booksCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.send(result.map(toPublicBook));
+  } catch (error) {
+    console.error("Public catalog error:", error);
+    res.status(503).send({ error: "The book catalog is temporarily unavailable." });
+  }
+});
+
+// Public discovery route used by the Home page. MongoDB performs both the
+// newest-first ordering and the six-book limit, so the browser never has to
+// infer recency or trim a larger catalog response.
+app.get("/new-arrivals", async (req, res) => {
+  try {
+    const result = await booksCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .limit(6)
+      .toArray();
+    res.send(result.map(toPublicBook));
+  } catch (error) {
+    console.error("New arrivals error:", error);
+    res.status(503).send({ error: "The book catalog is temporarily unavailable." });
+  }
+});
 
 // Get one book by its MongoDB ID (e.g. /book/6aeb69efaaab895ddf6d8480)
 app.get("/book/:id", async (req, res) => {
